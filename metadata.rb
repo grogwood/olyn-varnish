@@ -6,7 +6,7 @@ license 'GPL-3.0'
 supports 'debian', '>= 10'
 source_url 'https://gitlab.com/olyn/olyn_varnish'
 description 'Installs and configures the Varnish HTTP cache'
-version '2.0.1'
+version '2.0.2'
 
 provides 'olyn_varnish::default'
 recipe 'olyn_varnish::default', 'Installs Varnish HTTP cache'
