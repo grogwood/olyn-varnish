@@ -1,35 +1,23 @@
 #
-# This is an example VCL file for Varnish.
-#
-# It does not do anything by default, delegating control to the
-# builtin VCL. The builtin VCL is called when there is no explicit
-# return statement.
+# Custom VCL
 #
 # See the VCL chapters in the Users Guide at https://www.varnish-cache.org/docs/
 # and https://www.varnish-cache.org/trac/wiki/VCLExamples for more examples.
 
-# Marker to tell the VCL compiler that this VCL has been adapted to the
-# new 4.0 format.
+# Marker to tell the VCL compiler that this VCL has been adapted to the new 4.0 format
 vcl 4.0;
 
+# Import standrad library with common helpful functions for strings, time, etc.
 import std;
-import directors;
 
-# Default backend definition. Set this to point to your content server.
+# Default backend definition
 backend default {
-  .host = "<%= @node[:olyn_varnish][:host] %>";
-  .port = "<%= @backend_port_item[:port] %>";
+  .host = "<%= @backend[:host] %>";
+  .port = "<%= @backend[:port_item][:port] %>";
 }
 
+# IP addresses that are allowed to purge
 acl purge {
-  # ACL we'll use later to allow purges
-  "localhost";
-  "127.0.0.1";
-  "::1";
-}
-
-acl editors {
-  # ACL to honor the "Cache-Control: no-cache" header to force a refresh but only from selected IPs
   "localhost";
   "127.0.0.1";
   "::1";
@@ -42,22 +30,8 @@ sub vcl_init {
 
 sub vcl_recv {
   # Called at the beginning of a request, after the complete request has been received and parsed.
-  # Its purpose is to decide whether or not to serve the request, how to do it, and, if applicable,
-  # which backend to use.
-  # also used to modify the request
-
-  # Set our base host
-  set  req.http.Host = "<%= @http_host %>";
-
-  # Remove the proxy header (see https://httpoxy.org/#mitigate-varnish)
-  unset req.http.proxy;
-
-  # Set our user's IP instead of the server's
-  #unset req.http.X-Forwarded-For;
-  #set  req.http.X-Forwarded-For = client.ip;
-
-  # Normalize the query arguments
-  set  req.url = std.querysort(req.url);
+  # Its purpose is to decide whether or not to serve the request, how to do it, and, if applicable, which backend to use.
+  # Also used to modify the request
 
   # Allow purging
   if (req.method == "PURGE") {
@@ -83,11 +57,32 @@ sub vcl_recv {
     return (synth(404, "Non-valid HTTP method!"));
   }
 
-  <% if @pipe_urls[:regexp].count > 0 -%>
-  # Pipe specific pages
+  # Implementing websocket support (https://www.varnish-cache.org/docs/4.0/users-guide/vcl-example-websockets.html)
+  if (req.http.Upgrade ~ "(?i)websocket") {
+    return (pipe);
+  }
+
+  # Large static files are delivered directly to the end-user without waiting for Varnish to fully read the file first.
+  # Varnish 4 fully supports Streaming, so set do_stream in vcl_backend_response()
+  if (req.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
+    return(pass);
+  }
+
+  # Only cache GET or HEAD requests. This makes sure the POST requests are always passed.
+  if (req.method != "GET" && req.method != "HEAD") {
+    return (pass);
+  }
+
+  # Do not cache pages with authorizations
+  if (req.http.Authorization) {
+    return (pass);
+  }
+
+  <% if @regexp[:pipe_urls_item][:regexp].count > 0 -%>
+  # Force pipe on these specific URLs
   if (
   <% i = 0 -%>
-  <% @pipe_urls[:regexp].each do |url| -%>
+  <% @regexp[:pipe_urls_item][:regexp].each do |url| -%>
   <% if i > 0 %>|| <% end %>req.url ~ "<%= url %>"
   <% i += 1 -%>
   <% end -%>
@@ -96,11 +91,11 @@ sub vcl_recv {
   }
   <% end %>
 
-  <% if @bypass_urls[:regexp].count > 0 -%>
-  # Ignore caching for specific pages
+  <% if @regexp[:bypass_cache_urls_item][:regexp].count > 0 -%>
+  # Bypass caching on these specific URLs
   if (
   <% i = 0 -%>
-  <% @bypass_urls[:regexp].each do |url| -%>
+  <% @regexp[:bypass_cache_urls_item][:regexp].each do |url| -%>
   <% if i > 0 %>|| <% end %>req.url ~ "<%= url %>"
   <% i += 1 -%>
   <% end -%>
@@ -109,80 +104,79 @@ sub vcl_recv {
   }
   <% end -%>
 
-  <% if @cookie_urls[:regexp].count > 0 -%>
-  # Remove cookies / cache busting headers except for our allowed pages
+  <% if @regexp[:allow_cookie_urls_item][:regexp].count > 0 -%>
+  # Remove cookies in the request EXCEPT for these specific URLs
   if (
   <% i = 0 -%>
-  <% @cookie_urls[:regexp].each do |url| -%>
+  <% @regexp[:allow_cookie_urls_item][:regexp].each do |url| -%>
   <% if i > 0 %>&& <% end %>!req.url ~ "<%= url %>"
   <% i += 1 -%>
   <% end -%>
   ) {
-    unset req.http.Cache-Control;
-    unset req.http.Max-Age;
-    unset req.http.Pragma;
     unset req.http.Cookie;
   }
   <% end -%>
 
-  # Implementing websocket support (https://www.varnish-cache.org/docs/4.0/users-guide/vcl-example-websockets.html)
-  if (req.http.Upgrade ~ "(?i)websocket") {
-    return (pipe);
-  }
-
-  # Only cache GET or HEAD requests. This makes sure the POST requests are always passed.
-  if (req.method != "GET" && req.method != "HEAD") {
-    return (pass);
-  }
-
-  <% if @url_parameters[:regexp].count > 0 -%>
-  # Some generic URL manipulation, useful for all templates that follow
-  # Removes any GA params, ad trackers, etc.
-  if (req.url ~ "(\?|&)(<%= @url_parameters[:regexp].join('|') %>)=") {
-    set req.url = regsuball(req.url, "(<%= @url_parameters[:regexp].join('|') %>)=[-_A-z0-9+()%.]+&?", "");
-    set req.url = regsub(req.url, "[?|&]+$", "");
-  }
-  <% end -%>
-
-  # Strip hash, server doesn't need it.
-  if (req.url ~ "\#") {
-    set req.url = regsub(req.url, "\#.*$", "");
-  }
-
-  # Strip a trailing ? if it exists
-  if (req.url ~ "\?$") {
-    set req.url = regsub(req.url, "\?$", "");
-  }
-
-  if (req.http.Cache-Control ~ "(?i)no-cache" && client.ip ~ editors) {
-    # create the acl editors if you want to restrict the Ctrl-F5
-    # http://varnish.projects.linpro.no/wiki/VCLExampleEnableForceRefresh
-    # Ignore requests via proxy caches and badly behaved crawlers
-    # like msnbot that send no-cache with every request.
-    if (! (req.http.Via || req.http.User-Agent ~ "(?i)bot" || req.http.X-Purge)) {
-      #set req.hash_always_miss = true; # Doesn't seems to refresh the object in the cache
-      return (purge); # Couple this with restart in vcl_purge and X-Purge header to avoid loops
-    }
-  }
-
-  # Large static files are delivered directly to the end-user without
-  # waiting for Varnish to fully read the file first.
-  # Varnish 4 fully supports Streaming, so set do_stream in vcl_backend_response()
-  if (req.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
-    #unset req.http.Cookie;
-    #return (hash);
-    return(pass);
-  }
-
-  # Send Surrogate-Capability headers to announce ESI support to backend
-  set req.http.Surrogate-Capability = "key=ESI/1.0";
-
-  if (req.http.Authorization) {
-    # Not cacheable by default
+  # Do not cache pages with cookies if they are still set at this point
+  if (req.http.Cookie) {
     return (pass);
   }
 
   return (hash);
+}
+
+sub vcl_hash {
+  # Called after vcl_recv to create a hash value for the request
+  # This is used as a key to look up the object in Varnish.
+
+  # Set the base host
+  set  req.http.Host = "<%= @config[:http_host] %>";
+
+  # Remove the proxy header (see https://httpoxy.org/#mitigate-varnish)
+  unset req.http.proxy;
+
+  # Set the user's IP instead of the server's
+  #unset req.http.X-Forwarded-For;
+  #set  req.http.X-Forwarded-For = client.ip;
+
+  # Send Surrogate-Capability headers to announce ESI support to backend
+  set req.http.Surrogate-Capability = "key=ESI/1.0";
+
+  # Normalize the query arguments
+  set  req.url = std.querysort(req.url);
+
+  <% if @regexp[:url_parameters_item][:regexp].count > 0 -%>
+  # Generic URL manipulation that removes specific params from the query string if they are present
+  if (req.url ~ "(\?|&)(<%= @regexp[:url_parameters_item][:regexp].join('|') %>)=") {
+    set req.url = regsuball(req.url, "(<%= @regexp[:url_parameters_item][:regexp].join('|') %>)=[-_A-z0-9+()%.]+&?", "");
+    set req.url = regsub(req.url, "[?|&]+$", "");
+  }
+  <% end -%>
+
+  # Strip hash (#) if present
+  if (req.url ~ "\#") {
+    set req.url = regsub(req.url, "\#.*$", "");
+  }
+
+  # Strip a trailing ? if it is present
+  if (req.url ~ "\?$") {
+    set req.url = regsub(req.url, "\?$", "");
+  }
+
+  # Add page URL to hash data
+  hash_data(req.url);
+
+  # Add host to hash data
+  if (req.http.host) {
+    hash_data(req.http.host);
+  } else {
+    hash_data(server.ip);
+  }
+
+  # Add cookies to hash if they are present
+  if (req.http.Cookie) {
+    hash_data(req.http.Cookie);
+  }
 }
 
 sub vcl_pipe {
@@ -214,33 +208,14 @@ sub vcl_pass {
   # backend's response is passed on to the client, but is not entered into the cache. Subsequent
   # requests submitted over the same client connection are handled normally.
 
-  # return (pass);
-}
-
-# The data on which the hashing will take place
-sub vcl_hash {
-  # Called after vcl_recv to create a hash value for the request. This is used as a key
-  # to look up the object in Varnish.
-
-  hash_data(req.url);
-
-  if (req.http.host) {
-    hash_data(req.http.host);
-  } else {
-    hash_data(server.ip);
-  }
-
-  # hash cookies for requests that have them
-  if (req.http.Cookie) {
-    hash_data(req.http.Cookie);
-  }
+  return (fetch);
 }
 
 sub vcl_hit {
-  # Called when a cache lookup is successful.
+  # Called when a cache lookup is successful
 
+  # A direct cache hit
   if (obj.ttl >= 0s) {
-    # A pure unadultered hit, deliver it
     return (deliver);
   }
 
@@ -265,26 +240,22 @@ sub vcl_hit {
     }
   }
 
-  # fetch & deliver once we get the result
-  return (miss); # Dead code, keep as a safeguard
+  # No cache hit
+  return (miss);
 }
 
 sub vcl_miss {
-  # Called after a cache lookup if the requested document was not found in the cache. Its purpose
-  # is to decide whether or not to attempt to retrieve the document from the backend, and which
-  # backend to use.
+  # Called after a cache lookup if the requested document was not found in the cache.
+  # Its purpose is to decide whether or not to attempt to retrieve the document from the backend, and which backend to use.
 
   return (fetch);
 }
 
-# Handle the HTTP request coming from our backend
 sub vcl_backend_response {
-  # Called after the response headers has been successfully retrieved from the backend.
+  # Handle the HTTP request coming from the backend HTTP server
+  # Called after the response headers have been successfully retrieved from the backend.
 
-  # Cache everything for 1 year, ignoring any cache headers
-  set beresp.ttl = 1w;
-
-  # use stale to answer immediately if expired less than 10 minutes ago
+  # Use stale to answer immediately if expired less than 10 minutes
   set beresp.grace = 10m;
 
   # Pause ESI request and remove Surrogate-Control header
@@ -293,25 +264,12 @@ sub vcl_backend_response {
     set beresp.do_esi = true;
   }
 
-  # Large static files are delivered directly to the end-user without
-  # waiting for Varnish to fully read the file first.
+  # Large static files are delivered directly to the end-user without waiting for Varnish to fully read the file first.
   # Varnish 4 fully supports Streaming, so use streaming here to avoid locking.
   if (bereq.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
-    set beresp.do_stream = true;  # Check memory usage it'll grow in fetch_chunksize blocks (128k by default) if the backend doesn't send a Content-Length header, so only enable it for big objects
+    # Check memory usage it'll grow in fetch_chunksize blocks (128k by default) if the backend doesn't send a Content-Length header, so only enable it for big objects
+    set beresp.do_stream = true;
   }
-
-  <% if @cookie_urls[:regexp].count > 0 -%>
-  # Remove server sidecookie setting except for our allowed pages
-  if (
-  <% i = 0 -%>
-  <% @cookie_urls[:regexp].each do |url| -%>
-  <% if i > 0 %>&& <% end %>!bereq.url ~ "<%= url %>"
-  <% i += 1 -%>
-  <% end -%>
-  ) {
-    unset beresp.http.set-cookie;
-  }
-  <% end -%>
 
   # Sometimes, a 301 or 302 redirect formed via Apache's mod_rewrite can mess with the HTTP port that is being passed along.
   # This often happens with simple rewrite rules in a scenario where Varnish runs on :80 and Apache on :8080 on the same box.
@@ -328,46 +286,71 @@ sub vcl_backend_response {
     return (abandon);
   }
 
-  # Set 2min cache if unset for static files
-  if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
-    set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
+  <% if @regexp[:allow_cookie_urls_item][:regexp].count > 0 -%>
+  # Remove server set cookie headers EXCEPT on the following URLs
+  if (
+  <% i = 0 -%>
+  <% @regexp[:allow_cookie_urls_item][:regexp].each do |url| -%>
+    <% if i > 0 %>&& <% end %>!bereq.url ~ "<%= url %>"
+    <% i += 1 -%>
+  <% end -%>
+  ) {
+    unset beresp.http.set-cookie;
+  }
+  <% end -%>
+
+  # Forcefully set no-cache policy on these specific URLs
+  if (
+  bereq.method == "POST"
+  <% if @regexp[:no_cache_urls_item][:regexp].count > 0 -%>
+  <% @regexp[:no_cache_urls_item][:regexp].each do |url| -%>
+  || bereq.url ~ "<%= url %>"
+  <% end -%>
+  <% end -%>
+  ) {
+    unset beresp.http.Cache-Control;
+    unset beresp.http.Max-Age;
+    unset beresp.http.Pragma;
+    set beresp.http.Cache-Control = "max-age=0, private, no-cache";
+    set beresp.ttl = 0s;
     set beresp.uncacheable = true;
-    return (deliver);
   }
 
-  # Allow stale content, in case the backend goes down.
-  # make Varnish keep all objects for 6 hours beyond their TTL
-  set beresp.grace = 6h;
+  # Set 0s TTL for responses with Set cookie commands, POST data, or vary controls
+  if (beresp.http.Set-Cookie || beresp.http.Vary == "*") {
+    set beresp.ttl = 0s;
+    set beresp.uncacheable = true;
+  }
 
   return (deliver);
 }
 
-# The routine when we deliver the HTTP request to the user
-# Last chance to modify headers that are sent to the client
 sub vcl_deliver {
-  # Called before a cached object is delivered to the client.
+  # The routine when we deliver the HTTP request to the user
+  # Last chance to modify headers that are sent to the client
 
-  if (obj.hits > 0) { # Add debug header to see if it's a HIT/MISS and the number of hits, disable when not needed
+  # Set header for hit/miss
+  if (obj.hits > 0) {
     set resp.http.X-Cache = "HIT";
   } else {
     set resp.http.X-Cache = "MISS";
   }
 
   # Please note that obj.hits behaviour changed in 4.0, now it counts per objecthead, not per object
-  # and obj.hits may not be reset in some cases where bans are in use. See bug 1492 for details.
+  # obj.hits may not be reset in some cases where bans are in use. See bug 1492 for details.
   # So take hits with a grain of salt
   set resp.http.X-Cache-Hits = obj.hits;
 
-  # Remove some headers: PHP version
-  unset resp.http.X-Powered-By;
+  # Display the remaining TTL for the object
+  set resp.http.X-Cache-TTL = std.integer(obj.ttl, 0);
 
-  # Remove some headers: Apache version & OS
+  # Remove some common server side headers
+  unset resp.http.X-Powered-By; # PHP
   unset resp.http.Server;
-  unset resp.http.X-Drupal-Cache;
-  unset resp.http.X-Varnish;
   unset resp.http.Via;
-  unset resp.http.Link;
+  unset resp.http.X-Varnish;
   unset resp.http.X-Generator;
+  #unset resp.http.Link;
 
   return (deliver);
 }
@@ -375,7 +358,6 @@ sub vcl_deliver {
 sub vcl_purge {
   # Only handle actual PURGE HTTP methods, everything else is discarded
   if (req.method != "PURGE") {
-    # restart request
     set req.http.X-Purge = "Yes";
     return (restart);
   }
