@@ -104,18 +104,15 @@ sub vcl_recv {
   }
   <% end -%>
 
-  <% if @regexp[:allow_cookie_urls_item][:regexp].count > 0 -%>
   # Remove cookies in the request EXCEPT for these specific URLs
   if (
-  <% i = 0 -%>
+  req.http.Cookie
   <% @regexp[:allow_cookie_urls_item][:regexp].each do |url| -%>
-  <% if i > 0 %>&& <% end %>!req.url ~ "<%= url %>"
-  <% i += 1 -%>
+  && !req.url ~ "<%= url %>"
   <% end -%>
   ) {
     unset req.http.Cookie;
   }
-  <% end -%>
 
   # Do not cache pages with cookies if they are still set at this point
   if (req.http.Cookie) {
@@ -286,26 +283,21 @@ sub vcl_backend_response {
     return (abandon);
   }
 
-  <% if @regexp[:allow_cookie_urls_item][:regexp].count > 0 -%>
   # Remove server set cookie headers EXCEPT on the following URLs
   if (
-  <% i = 0 -%>
+  beresp.http.set-cookie
   <% @regexp[:allow_cookie_urls_item][:regexp].each do |url| -%>
-    <% if i > 0 %>&& <% end %>!bereq.url ~ "<%= url %>"
-    <% i += 1 -%>
+  && !req.url ~ "<%= url %>"
   <% end -%>
   ) {
     unset beresp.http.set-cookie;
   }
-  <% end -%>
 
   # Forcefully set no-cache policy on these specific URLs
   if (
   bereq.method == "POST"
-  <% if @regexp[:no_cache_urls_item][:regexp].count > 0 -%>
   <% @regexp[:no_cache_urls_item][:regexp].each do |url| -%>
   || bereq.url ~ "<%= url %>"
-  <% end -%>
   <% end -%>
   ) {
     unset beresp.http.Cache-Control;
@@ -329,8 +321,10 @@ sub vcl_deliver {
   # The routine when we deliver the HTTP request to the user
   # Last chance to modify headers that are sent to the client
 
-  # Set header for hit/miss
-  if (obj.hits > 0) {
+  # Set header for hit/miss/dynamic
+  if (obj.uncacheable) {
+    set resp.http.X-Cache = "DYNAMIC";
+  } elseif (obj.hits > 0) {
     set resp.http.X-Cache = "HIT";
   } else {
     set resp.http.X-Cache = "MISS";
