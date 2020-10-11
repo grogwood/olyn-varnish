@@ -301,6 +301,7 @@ sub vcl_backend_response {
   <% end -%>
   ) {
     unset beresp.http.Cache-Control;
+    unset beresp.http.Expires;
     unset beresp.http.Max-Age;
     unset beresp.http.Pragma;
     set beresp.http.Cache-Control = "max-age=0, private, no-cache";
