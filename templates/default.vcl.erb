@@ -287,7 +287,7 @@ sub vcl_backend_response {
   if (
   beresp.http.set-cookie
   <% @regexp[:allow_cookie_urls_item][:regexp].each do |url| -%>
-  && !req.url ~ "<%= url %>"
+  && !bereq.url ~ "<%= url %>"
   <% end -%>
   ) {
     unset beresp.http.set-cookie;
